@@ -98,6 +98,53 @@ PROJECT_DIR=$(jval '.workspace.project_dir' '"?"')
 PROJECT_NAME=$(basename "$PROJECT_DIR")
 CWD_SHORT=$(echo "$CWD" | sed "s|$HOME|~|")
 
+# ── Git Info ──
+GIT_INFO=""
+if [ "$SHOW_GIT" != "0" ]; then
+  GIT_BRANCH=$(git -C "$CWD" symbolic-ref --short HEAD 2>/dev/null)
+  if [ -n "$GIT_BRANCH" ]; then
+    GIT_DIRTY=""
+    if [ -n "$(git -C "$CWD" status --porcelain 2>/dev/null)" ]; then
+      GIT_DIRTY="${RED}*${RST}"
+    fi
+    GIT_INFO="  ${DIM}│${RST}  ${GRN}${GIT_BRANCH}${RST}${GIT_DIRTY}"
+  fi
+fi
+
+# ── Effort Level ──
+EFFORT_INFO=""
+if [ "$SHOW_EFFORT" != "0" ]; then
+  EFFORT=$(jq -r '.effortLevel // "default"' "$HOME/.claude/settings.json" 2>/dev/null)
+  case "$EFFORT" in
+    high)   EFFORT_INFO="  ${DIM}│${RST}  ${MAG}● ${EFFORT}${RST}" ;;
+    medium) EFFORT_INFO="  ${DIM}│${RST}  ${DIM}◑ ${EFFORT}${RST}" ;;
+    low)    EFFORT_INFO="  ${DIM}│${RST}  ${DIM}◔ ${EFFORT}${RST}" ;;
+    *)      EFFORT_INFO="  ${DIM}│${RST}  ${DIM}◑ ${EFFORT}${RST}" ;;
+  esac
+fi
+
+# ── Token Speed ──
+# Note: CUR_OUT is context-window-scoped output tokens, not cumulative session total.
+# Speed readings reset after context compaction. This is a known limitation.
+SPEED_INFO=""
+if [ "$SHOW_SPEED" != "0" ]; then
+  SPEED_CACHE="/tmp/claude/cc-speed-${SESSION_ID}.dat"
+  NOW_MS=$(($(date +%s) * 1000))
+  if [ -f "$SPEED_CACHE" ]; then
+    PREV_OUT=$(sed -n '1p' "$SPEED_CACHE")
+    PREV_MS=$(sed -n '2p' "$SPEED_CACHE")
+    DELTA_T=$((NOW_MS - PREV_MS))
+    DELTA_O=$((CUR_OUT - PREV_OUT))
+    if [ "$DELTA_O" -lt 0 ]; then
+      : # Context compaction — skip, cache will be overwritten below
+    elif [ "$DELTA_T" -gt 0 ] && [ "$DELTA_O" -gt 0 ]; then
+      SPEED=$(echo "scale=1; $DELTA_O * 1000 / $DELTA_T" | bc -l)
+      SPEED_INFO="  ${DIM}│${RST}  ${WHT}${SPEED} tok/s${RST}"
+    fi
+  fi
+  printf '%s\n%s\n' "$CUR_OUT" "$NOW_MS" > "$SPEED_CACHE"
+fi
+
 # ── Cost Breakdown (transcript parse with 5s cache) ──
 P_CACHE=0; P_WRITE=0; P_OUT=0
 
@@ -198,7 +245,7 @@ row "  CONTEXT  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${DIM}│${RST}  $(fmt_k $CTX_U
 echo -e "$MDIV"
 row "  ${DIM}Cost:${RST} ${DIM}Cache${RST} \$${R_CACHE} ${DIM}Write${RST} \$${R_WRITE} ${DIM}Out${RST} \$${R_OUT} ${DIM}│${RST} ${DIM}API${RST} ${API_FMT} ${DIM}Max${RST} ${COST_FMT}"
 echo -e "$MDIV"
-row "  ${CYN}${MODEL_NAME}${RST}  ${DIM}│${RST}  ${GRN}${PROJECT_NAME}${RST}  ${DIM}·${RST}  ${CWD_SHORT}"
+row "  ${BLU}${MODEL_NAME}${RST}  ${DIM}│${RST}  ${CYN}${PROJECT_NAME}${RST}  ${DIM}·${RST}  ${CWD_SHORT}${GIT_INFO}"
 echo -e "$MDIV"
-row "  ${DIM}Duration:${RST} ${TIME_FMT}  ${DIM}│${RST}  ${DIM}CC Version:${RST} ${VERSION}"
+row "  ${DIM}Duration:${RST} ${TIME_FMT}  ${DIM}│${RST}  ${DIM}CC:${RST} ${VERSION}${EFFORT_INFO}${SPEED_INFO}"
 echo -e "$FDIV"
