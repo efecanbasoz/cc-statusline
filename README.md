@@ -16,7 +16,8 @@ A Claude Code statusline that shows context window usage, cost breakdown, and se
 ```bash
 git clone https://github.com/sirkhet-dev/cc-statusline.git
 cd cc-statusline
-./install.sh
+./install.sh                # interactive — choose slim or full
+./install.sh --edition full # direct full install
 ```
 
 ## Manual Install
@@ -58,6 +59,10 @@ brew:   brew install jq python3 bc
 pacman: sudo pacman -S jq python bc
 ```
 
+Full edition also uses:
+- `git` -- branch info
+- `curl` -- rate limit API
+
 ## Uninstall
 
 ```bash
@@ -80,7 +85,46 @@ You can modify the following in `slim/statusline.sh`:
 
 ## Full Version
 
-Coming soon -- git branch info, rate limits, and more.
+The full edition adds git info, rate limits, effort level, token speed, tool/agent tracking, and todo progress -- all configurable via environment variables.
+
+### Additional Features
+
+- **Git** -- branch name with dirty indicator (`main*`)
+- **Effort Level** -- current effort setting with visual icon
+- **Rate Limits** -- 5-hour and 7-day usage bars with reset times (Pro/Max/Team)
+- **Token Speed** -- output tokens per second
+- **Tool Tracking** -- currently running and recently completed tools
+- **Agent Tracking** -- running subagents with type and duration
+- **Todo Progress** -- task completion count and current task name
+- **Session Name** -- custom title or auto-generated slug
+
+### Install Full Edition
+
+```bash
+./install.sh --edition full
+```
+
+## Configuration
+
+Toggle features with environment variables. Set in `~/.bashrc`, `~/.zshrc`, or your shell profile:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CC_SHOW_GIT` | `1` | Git branch + dirty state |
+| `CC_SHOW_EFFORT` | `1` | Effort level indicator |
+| `CC_SHOW_USAGE` | `1` | Rate limit bars |
+| `CC_SHOW_SPEED` | `0` | Output token speed |
+| `CC_SHOW_TOOLS` | `0` | Tool activity line |
+| `CC_SHOW_AGENTS` | `0` | Agent tracking line |
+| `CC_SHOW_TODOS` | `0` | Todo progress line |
+| `CC_SHOW_SESSION` | `0` | Session name display |
+
+Example:
+```bash
+export CC_SHOW_TOOLS=1 CC_SHOW_AGENTS=1 CC_SHOW_TODOS=1
+```
+
+Set `0` to disable, any other value to enable.
 
 ## License
 
