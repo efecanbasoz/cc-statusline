@@ -158,17 +158,26 @@ if [ -f "$CACHE_FILE" ]; then
 fi
 
 if [ "$PARSE" -eq 1 ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-  COST_DATA=$(TRANSCRIPT_PATH="$TRANSCRIPT" TOTAL_COST_USD="$TOTAL_COST" python3 << 'PYEOF'
+  COST_DATA=$(TRANSCRIPT_PATH="$TRANSCRIPT" TOTAL_COST_USD="$TOTAL_COST" \
+    SHOW_TOOLS="$SHOW_TOOLS" SHOW_AGENTS="$SHOW_AGENTS" \
+    SHOW_TODOS="$SHOW_TODOS" SHOW_SESSION="$SHOW_SESSION" python3 << 'PYEOF'
 import json, sys, os
+from collections import defaultdict
 
 transcript = os.environ.get("TRANSCRIPT_PATH", "")
 total_cost = float(os.environ.get("TOTAL_COST_USD", "0"))
+show_tools = os.environ.get("SHOW_TOOLS", "0") != "0"
+show_agents = os.environ.get("SHOW_AGENTS", "0") != "0"
+show_todos = os.environ.get("SHOW_TODOS", "0") != "0"
+show_session = os.environ.get("SHOW_SESSION", "0") != "0"
 
-if not transcript or not os.path.isfile(transcript) or total_cost <= 0:
-    print("0\n0\n0\n0.00\n0.00\n0.00")
+# 8 output lines always emitted
+out = ["0.00", "0.00", "0.00", "0.00", "", "", "", ""]
+
+if not transcript or not os.path.isfile(transcript):
+    print("\n".join(out))
     sys.exit(0)
 
-# API rate weights (relative pricing structure per MTok)
 PRICING = {
     "claude-opus-4":   {"in": 5,    "out": 25, "c5m": 6.25, "c1h": 10,  "crd": 0.50},
     "claude-sonnet-4": {"in": 3,    "out": 15, "c5m": 3.75, "c1h": 6,   "crd": 0.30},
@@ -184,37 +193,168 @@ def get_pricing(model):
     return PRICING["claude-opus-4"]
 
 by_id = {}
+tools = {}
+agents = {}
+todos = []
+session_name = ""
+task_id_map = {}
+
 with open(transcript) as f:
     for line in f:
         try:
             e = json.loads(line)
-            msg = e.get("message", {})
-            if msg.get("usage") and msg.get("id"):
-                by_id[msg["id"]] = msg
         except Exception:
-            pass
+            continue
 
-# Calculate API costs directly
-c_cache = 0.0  # cache reads
-c_write = 0.0  # cache writes + base input
-c_out = 0.0    # output
+        # Session name
+        if show_session:
+            if e.get("type") == "custom-title" and isinstance(e.get("customTitle"), str):
+                session_name = e["customTitle"]
+            elif isinstance(e.get("slug"), str):
+                if not session_name:
+                    session_name = e["slug"]
 
-for msg in by_id.values():
-    u = msg["usage"]
-    p = get_pricing(msg.get("model", ""))
-    c_cache += u.get("cache_read_input_tokens", 0) * p["crd"] / 1_000_000
-    c = u.get("cache_creation", {})
-    c_write += c.get("ephemeral_5m_input_tokens", 0) * p["c5m"] / 1_000_000
-    c_write += c.get("ephemeral_1h_input_tokens", 0) * p["c1h"] / 1_000_000
-    c_write += u.get("input_tokens", 0) * p["in"] / 1_000_000
-    c_out   += u.get("output_tokens", 0) * p["out"] / 1_000_000
+        msg = e.get("message", {})
+        if msg.get("usage") and msg.get("id"):
+            by_id[msg["id"]] = msg
 
+        # Reset tools on each new assistant message (scope to last turn)
+        if show_tools and e.get("type") == "assistant" and msg.get("role") == "assistant":
+            tools.clear()
+
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+
+        ts = e.get("timestamp", "")
+
+        for block in content:
+            btype = block.get("type")
+            bid = block.get("id", "")
+            bname = block.get("name", "")
+            inp = block.get("input", {}) or {}
+
+            if btype == "tool_use" and bid and bname:
+                if bname == "Task" and show_agents:
+                    agents[bid] = {
+                        "type": inp.get("subagent_type", "agent"),
+                        "model": inp.get("model", ""),
+                        "desc": (inp.get("description", "") or "")[:40],
+                        "ts": ts, "status": "running"
+                    }
+                elif bname == "TodoWrite" and show_todos:
+                    raw = inp.get("todos", [])
+                    if isinstance(raw, list):
+                        todos.clear()
+                        task_id_map.clear()
+                        for t in raw:
+                            if isinstance(t, dict):
+                                todos.append({"content": t.get("content", ""), "status": t.get("status", "pending")})
+                elif bname == "TaskCreate" and show_todos:
+                    subj = inp.get("subject", "") or inp.get("description", "") or "Task"
+                    status = inp.get("status", "pending")
+                    if status in ("not_started",): status = "pending"
+                    if status in ("running",): status = "in_progress"
+                    if status in ("complete", "done"): status = "completed"
+                    todos.append({"content": subj, "status": status})
+                    tid = str(inp.get("taskId", bid))
+                    task_id_map[tid] = len(todos) - 1
+                elif bname == "TaskUpdate" and show_todos:
+                    tid = str(inp.get("taskId", ""))
+                    idx = task_id_map.get(tid)
+                    if idx is None and tid.isdigit():
+                        ni = int(tid) - 1
+                        if 0 <= ni < len(todos): idx = ni
+                    if idx is not None and 0 <= idx < len(todos):
+                        st = inp.get("status")
+                        if st in ("not_started",): st = "pending"
+                        if st in ("running",): st = "in_progress"
+                        if st in ("complete", "done"): st = "completed"
+                        if st in ("pending", "in_progress", "completed"):
+                            todos[idx]["status"] = st
+                        subj = inp.get("subject", "") or inp.get("description", "")
+                        if subj: todos[idx]["content"] = subj
+                elif show_tools and bname not in ("Task", "TodoWrite", "TaskCreate", "TaskUpdate"):
+                    target = ""
+                    if bname in ("Read", "Write", "Edit"):
+                        target = inp.get("file_path", inp.get("path", ""))
+                        if target:
+                            target = target.rsplit("/", 1)[-1]
+                    elif bname in ("Glob", "Grep"):
+                        target = inp.get("pattern", "")
+                    elif bname == "Bash":
+                        cmd = inp.get("command", "")
+                        target = cmd[:25] + ("..." if len(cmd) > 25 else "")
+                    tools[bid] = {"name": bname, "target": target, "status": "running"}
+
+            elif btype == "tool_result" and block.get("tool_use_id"):
+                tuid = block["tool_use_id"]
+                if tuid in tools:
+                    tools[tuid]["status"] = "error" if block.get("is_error") else "done"
+                if tuid in agents:
+                    agents[tuid]["status"] = "done"
+
+# Cost calculation
+c_cache = c_write = c_out = 0.0
+if total_cost > 0:
+    for msg in by_id.values():
+        u = msg["usage"]
+        p = get_pricing(msg.get("model", ""))
+        c_cache += u.get("cache_read_input_tokens", 0) * p["crd"] / 1_000_000
+        c = u.get("cache_creation", {})
+        c_write += c.get("ephemeral_5m_input_tokens", 0) * p["c5m"] / 1_000_000
+        c_write += c.get("ephemeral_1h_input_tokens", 0) * p["c1h"] / 1_000_000
+        c_write += u.get("input_tokens", 0) * p["in"] / 1_000_000
+        c_out   += u.get("output_tokens", 0) * p["out"] / 1_000_000
 api_total = c_cache + c_write + c_out
+out[0] = f"{c_cache:.2f}"
+out[1] = f"{c_write:.2f}"
+out[2] = f"{c_out:.2f}"
+out[3] = f"{api_total:.2f}"
 
-print(f"{c_cache:.2f}")
-print(f"{c_write:.2f}")
-print(f"{c_out:.2f}")
-print(f"{api_total:.2f}")
+# Tools line
+if show_tools:
+    running = [t for t in tools.values() if t["status"] == "running"]
+    done = [t for t in tools.values() if t["status"] == "done"]
+    parts = []
+    for t in running[-3:]:
+        label = f"\u25d0 {t['name']}"
+        if t["target"]: label += f": {t['target']}"
+        parts.append(label)
+    counts = defaultdict(int)
+    for t in done[-20:]:
+        counts[t["name"]] += 1
+    for name, cnt in list(counts.items())[-3:]:
+        parts.append(f"\u2713 {name} \u00d7{cnt}")
+    out[4] = "  \u2502  ".join(parts) if parts else ""
+
+# Agents line
+if show_agents:
+    running_agents = [a for a in agents.values() if a["status"] == "running"]
+    parts = []
+    for a in running_agents[-3:]:
+        label = f"\u25d0 {a['type']}"
+        if a["model"]: label += f" [{a['model']}]"
+        if a["desc"]: label += f": {a['desc']}"
+        parts.append(label)
+    out[5] = "  \u2502  ".join(parts) if parts else ""
+
+# Todos line
+if show_todos and todos:
+    completed = sum(1 for t in todos if t["status"] == "completed")
+    total = len(todos)
+    current = next((t for t in todos if t["status"] == "in_progress"), None)
+    if not current:
+        current = next((t for t in todos if t["status"] == "pending"), None)
+    if current:
+        name = current["content"][:35]
+        out[6] = f"\u25b8 {name} ({completed}/{total})"
+
+# Session name
+if show_session and session_name:
+    out[7] = session_name
+
+print("\n".join(out))
 PYEOF
   )
 
@@ -223,7 +363,11 @@ PYEOF
     R_WRITE=$(echo "$COST_DATA" | sed -n '2p')
     R_OUT=$(echo "$COST_DATA" | sed -n '3p')
     R_API=$(echo "$COST_DATA" | sed -n '4p')
-    printf '%s\n%s\n%s\n%s\n' "$R_CACHE" "$R_WRITE" "$R_OUT" "$R_API" > "$CACHE_FILE"
+    R_TOOLS=$(echo "$COST_DATA" | sed -n '5p')
+    R_AGENTS=$(echo "$COST_DATA" | sed -n '6p')
+    R_TODOS=$(echo "$COST_DATA" | sed -n '7p')
+    R_SESSION=$(echo "$COST_DATA" | sed -n '8p')
+    printf '%s\n' "$R_CACHE" "$R_WRITE" "$R_OUT" "$R_API" "$R_TOOLS" "$R_AGENTS" "$R_TODOS" "$R_SESSION" > "$CACHE_FILE"
   fi
 else
   if [ -f "$CACHE_FILE" ]; then
@@ -231,11 +375,16 @@ else
     R_WRITE=$(sed -n '2p' "$CACHE_FILE")
     R_OUT=$(sed -n '3p' "$CACHE_FILE")
     R_API=$(sed -n '4p' "$CACHE_FILE")
+    R_TOOLS=$(sed -n '5p' "$CACHE_FILE")
+    R_AGENTS=$(sed -n '6p' "$CACHE_FILE")
+    R_TODOS=$(sed -n '7p' "$CACHE_FILE")
+    R_SESSION=$(sed -n '8p' "$CACHE_FILE")
   fi
 fi
 
 # Defaults
 : "${R_CACHE:=0.00}" "${R_WRITE:=0.00}" "${R_OUT:=0.00}" "${R_API:=0.00}"
+: "${R_TOOLS:=}" "${R_AGENTS:=}" "${R_TODOS:=}" "${R_SESSION:=}"
 
 API_FMT=$(printf '$%.2f' "$R_API")
 
@@ -372,7 +521,11 @@ row "  CONTEXT  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${DIM}│${RST}  $(fmt_k $CTX_U
 echo -e "$MDIV"
 row "  ${DIM}Cost:${RST} ${DIM}Cache${RST} \$${R_CACHE} ${DIM}Write${RST} \$${R_WRITE} ${DIM}Out${RST} \$${R_OUT} ${DIM}│${RST} ${DIM}API${RST} ${API_FMT} ${DIM}Max${RST} ${COST_FMT}"
 echo -e "$MDIV"
-row "  ${BLU}${MODEL_NAME}${RST}  ${DIM}│${RST}  ${CYN}${PROJECT_NAME}${RST}  ${DIM}·${RST}  ${CWD_SHORT}${GIT_INFO}"
+SESSION_DISPLAY=""
+if [ "$SHOW_SESSION" != "0" ] && [ -n "$R_SESSION" ]; then
+  SESSION_DISPLAY="  ${DIM}·${RST}  ${WHT}${R_SESSION}${RST}"
+fi
+row "  ${BLU}${MODEL_NAME}${RST}  ${DIM}│${RST}  ${CYN}${PROJECT_NAME}${RST}  ${DIM}·${RST}  ${CWD_SHORT}${GIT_INFO}${SESSION_DISPLAY}"
 echo -e "$MDIV"
 row "  ${DIM}Duration:${RST} ${TIME_FMT}  ${DIM}│${RST}  ${DIM}CC:${RST} ${VERSION}${EFFORT_INFO}${SPEED_INFO}"
 if [ -n "$USAGE_LINE" ]; then
@@ -380,3 +533,14 @@ if [ -n "$USAGE_LINE" ]; then
   row "$USAGE_LINE"
 fi
 echo -e "$FDIV"
+
+# ── Lower Section (frameless activity lines) ──
+if [ "$SHOW_TOOLS" != "0" ] && [ -n "$R_TOOLS" ]; then
+  echo -e "  ${R_TOOLS}"
+fi
+if [ "$SHOW_AGENTS" != "0" ] && [ -n "$R_AGENTS" ]; then
+  echo -e "  ${R_AGENTS}"
+fi
+if [ "$SHOW_TODOS" != "0" ] && [ -n "$R_TODOS" ]; then
+  echo -e "  ${R_TODOS}"
+fi
