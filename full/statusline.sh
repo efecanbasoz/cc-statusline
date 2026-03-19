@@ -239,6 +239,133 @@ fi
 
 API_FMT=$(printf '$%.2f' "$R_API")
 
+# ── Usage / Rate Limits ──
+USAGE_LINE=""
+if [ "$SHOW_USAGE" != "0" ]; then
+
+  get_oauth_token() {
+    local token=""
+    # 1. Credentials file
+    local creds="$HOME/.claude/.credentials.json"
+    if [ -f "$creds" ]; then
+      token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds" 2>/dev/null)
+      if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
+    fi
+    # 2. Linux keychain
+    if command -v secret-tool &>/dev/null; then
+      local blob
+      blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+      if [ -n "$blob" ]; then
+        token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+        if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
+      fi
+    fi
+    # 3. macOS keychain
+    if command -v security &>/dev/null; then
+      local blob
+      blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+      if [ -n "$blob" ]; then
+        token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+        if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
+      fi
+    fi
+    echo ""
+  }
+
+  build_usage_bar() {
+    local pct=$1 width=10
+    [ "$pct" -lt 0 ] 2>/dev/null && pct=0
+    [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+    local filled=$((pct * width / 100))
+    local empty=$((width - filled))
+    local clr
+    if [ "$pct" -ge 90 ]; then clr=$RED
+    elif [ "$pct" -ge 50 ]; then clr=$YEL
+    else clr=$GRN; fi
+    local f=$(printf '%*s' "$filled" '' | sed 's/ /●/g')
+    local e=$(printf '%*s' "$empty" '' | sed 's/ /○/g')
+    echo -ne "${clr}${f}${DIM}${e}${RST}"
+  }
+
+  format_reset_time() {
+    local iso="$1" style="$2"
+    [ -z "$iso" ] || [ "$iso" = "null" ] && return
+    local epoch
+    epoch=$(date -d "$iso" +%s 2>/dev/null)
+    if [ -z "$epoch" ]; then
+      local stripped="${iso%%.*}"; stripped="${stripped%%Z}"
+      epoch=$(env TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
+    fi
+    [ -z "$epoch" ] && return
+    case "$style" in
+      time)
+        date -d "@$epoch" +"%l:%M%P" 2>/dev/null | sed 's/^ //' || \
+        date -j -r "$epoch" +"%l:%M%p" 2>/dev/null | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]'
+        ;;
+      datetime)
+        date -d "@$epoch" +"%b %-d, %l:%M%P" 2>/dev/null | sed 's/^ //' | tr '[:upper:]' '[:lower:]' || \
+        date -j -r "$epoch" +"%b %-d, %l:%M%p" 2>/dev/null | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]'
+        ;;
+    esac
+  }
+
+  # Fetch usage with caching (60s success, 15s failure)
+  USAGE_CACHE="/tmp/claude/cc-usage-cache.json"
+  USAGE_DATA=""
+  NEEDS_FETCH=true
+
+  if [ -f "$USAGE_CACHE" ]; then
+    CACHE_MOD_U=$(stat -c %Y "$USAGE_CACHE" 2>/dev/null || stat -f %m "$USAGE_CACHE" 2>/dev/null || echo 0)
+    NOW_U=$(date +%s)
+    CACHE_AGE=$((NOW_U - CACHE_MOD_U))
+    if jq -e '.five_hour' "$USAGE_CACHE" &>/dev/null; then
+      [ "$CACHE_AGE" -lt 60 ] && NEEDS_FETCH=false
+    else
+      [ "$CACHE_AGE" -lt 15 ] && NEEDS_FETCH=false
+    fi
+    USAGE_DATA=$(cat "$USAGE_CACHE" 2>/dev/null)
+  fi
+
+  if $NEEDS_FETCH; then
+    TOKEN=$(get_oauth_token)
+    if [ -n "$TOKEN" ]; then
+      RESP=$(curl -s --max-time 5 \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+      if [ -n "$RESP" ] && echo "$RESP" | jq -e '.five_hour' &>/dev/null; then
+        USAGE_DATA="$RESP"
+        echo "$RESP" > "$USAGE_CACHE"
+      else
+        echo '{"error":true}' > "$USAGE_CACHE"
+      fi
+    fi
+    [ -z "$USAGE_DATA" ] && [ -f "$USAGE_CACHE" ] && USAGE_DATA=$(cat "$USAGE_CACHE" 2>/dev/null)
+  fi
+
+  # Build usage panel content
+  if [ -n "$USAGE_DATA" ] && echo "$USAGE_DATA" | jq -e '.five_hour' &>/dev/null; then
+    FIVE_PCT=$(echo "$USAGE_DATA" | jq -r '.five_hour.utilization // 0' | cut -d. -f1)
+    FIVE_RESET_ISO=$(echo "$USAGE_DATA" | jq -r '.five_hour.resets_at // empty')
+    FIVE_RESET=$(format_reset_time "$FIVE_RESET_ISO" "time")
+    FIVE_BAR=$(build_usage_bar "$FIVE_PCT")
+
+    SEVEN_PCT=$(echo "$USAGE_DATA" | jq -r '.seven_day.utilization // 0' | cut -d. -f1)
+    SEVEN_RESET_ISO=$(echo "$USAGE_DATA" | jq -r '.seven_day.resets_at // empty')
+    SEVEN_RESET=$(format_reset_time "$SEVEN_RESET_ISO" "datetime")
+    SEVEN_BAR=$(build_usage_bar "$SEVEN_PCT")
+
+    FIVE_CLR=$GRN; [ "$FIVE_PCT" -ge 50 ] && FIVE_CLR=$YEL; [ "$FIVE_PCT" -ge 90 ] && FIVE_CLR=$RED
+    SEVEN_CLR=$GRN; [ "$SEVEN_PCT" -ge 50 ] && SEVEN_CLR=$YEL; [ "$SEVEN_PCT" -ge 90 ] && SEVEN_CLR=$RED
+
+    USAGE_LINE="  ${WHT}current${RST} ${FIVE_BAR} ${FIVE_CLR}${FIVE_PCT}%${RST}"
+    [ -n "$FIVE_RESET" ] && USAGE_LINE+=" ${DIM}⟳${RST} ${WHT}${FIVE_RESET}${RST}"
+    USAGE_LINE+="  ${DIM}│${RST}  ${WHT}weekly${RST} ${SEVEN_BAR} ${SEVEN_CLR}${SEVEN_PCT}%${RST}"
+    [ -n "$SEVEN_RESET" ] && USAGE_LINE+=" ${DIM}⟳${RST} ${WHT}${SEVEN_RESET}${RST}"
+  fi
+
+fi
+
 # ── Output ──
 echo -e "$HDIV"
 row "  CONTEXT  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${DIM}│${RST}  $(fmt_k $CTX_USED)/$(fmt_k $CTX_SIZE)"
@@ -248,4 +375,8 @@ echo -e "$MDIV"
 row "  ${BLU}${MODEL_NAME}${RST}  ${DIM}│${RST}  ${CYN}${PROJECT_NAME}${RST}  ${DIM}·${RST}  ${CWD_SHORT}${GIT_INFO}"
 echo -e "$MDIV"
 row "  ${DIM}Duration:${RST} ${TIME_FMT}  ${DIM}│${RST}  ${DIM}CC:${RST} ${VERSION}${EFFORT_INFO}${SPEED_INFO}"
+if [ -n "$USAGE_LINE" ]; then
+  echo -e "$MDIV"
+  row "$USAGE_LINE"
+fi
 echo -e "$FDIV"
