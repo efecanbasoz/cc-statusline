@@ -143,8 +143,6 @@ if [ "$SHOW_SPEED" != "0" ]; then
 fi
 
 # ── Cost Breakdown (transcript parse with 5s cache) ──
-P_CACHE=0; P_WRITE=0; P_OUT=0
-
 mkdir -p /tmp/claude
 CACHE_FILE="/tmp/claude/cc-cost-${SESSION_ID}.dat"
 PARSE=1
@@ -519,7 +517,7 @@ if [ "$SHOW_SESSION" != "0" ] && [ -n "$R_SESSION" ]; then
 fi
 printf "%b\n" "$HLINE"
 row "  ${BLU}${MODEL_NAME}${RST}  ${VAL}${CWD_SHORT}${RST}  ${GIT_INFO}${EFFORT_INFO}${SESSION_DISPLAY}"
-row "  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${VAL}$(fmt_k $CTX_USED)/$(fmt_k $CTX_SIZE)${RST}"
+row "  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${VAL}$(fmt_k "$CTX_USED")/$(fmt_k "$CTX_SIZE")${RST}"
 row "  ${LBL}Duration${RST} ${VAL}${TIME_FMT}${RST}  ${LBL}CC${RST} ${VAL}${VERSION}${RST}${SPEED_INFO}"
 row "  ${LBL}Cache${RST} ${VAL}\$${R_CACHE}${RST}  ${LBL}Write${RST} ${VAL}\$${R_WRITE}${RST}  ${LBL}Out${RST} ${VAL}\$${R_OUT}${RST}   ${LBL}API${RST} ${VAL}${API_FMT}${RST}  ${LBL}Max${RST} ${VAL}${COST_FMT}${RST}"
 if [ -n "$USAGE_LINE" ]; then

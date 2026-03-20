@@ -86,9 +86,8 @@ PROJECT_NAME=$(basename "$PROJECT_DIR")
 CWD_SHORT=$(echo "$CWD" | sed "s|$HOME|~|")
 
 # ── Cost Breakdown (transcript parse with 5s cache) ──
-P_CACHE=0; P_WRITE=0; P_OUT=0
-
-CACHE_FILE="/tmp/cc-cost-${SESSION_ID}.dat"
+mkdir -p /tmp/claude
+CACHE_FILE="/tmp/claude/cc-cost-${SESSION_ID}.dat"
 PARSE=1
 if [ -f "$CACHE_FILE" ]; then
   CACHE_MOD=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
@@ -180,7 +179,7 @@ API_FMT=$(printf '$%.2f' "$R_API")
 
 # ── Output ──
 echo -e "$HDIV"
-row "  CONTEXT  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${DIM}│${RST}  $(fmt_k $CTX_USED)/$(fmt_k $CTX_SIZE)"
+row "  CONTEXT  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${DIM}│${RST}  $(fmt_k "$CTX_USED")/$(fmt_k "$CTX_SIZE")"
 echo -e "$MDIV"
 row "  ${DIM}Cost:${RST} ${DIM}Cache${RST} \$${R_CACHE} ${DIM}Write${RST} \$${R_WRITE} ${DIM}Out${RST} \$${R_OUT} ${DIM}│${RST} ${DIM}API${RST} ${API_FMT} ${DIM}Max${RST} ${COST_FMT}"
 echo -e "$MDIV"
