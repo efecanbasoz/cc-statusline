@@ -1,16 +1,21 @@
 #!/bin/bash
 input=$(cat)
 
-# ── Colors (true color) ──
-RED="\033[38;2;255;85;85m"
-YEL="\033[38;2;230;200;0m"
-GRN="\033[38;2;0;175;80m"
-CYN="\033[38;2;86;182;194m"
-BLU="\033[38;2;0;153;255m"
-MAG="\033[38;2;180;140;255m"
-WHT="\033[38;2;220;220;220m"
-DIM="\033[2m"
-RST="\033[0m"
+# ── Colors (true color, ANSI-C quoting for real ESC bytes) ──
+RED=$'\e[38;2;255;85;85m'
+YEL=$'\e[38;2;230;200;0m'
+GRN=$'\e[38;2;0;175;80m'
+CYN=$'\e[38;2;86;182;194m'
+BLU=$'\e[38;2;0;153;255m'
+MAG=$'\e[38;2;180;140;255m'
+# VAL: value color (orange for contrast on light themes)
+VAL=$'\e[38;2;230;140;50m'
+DIM=$'\e[2m'
+RST=$'\e[0m'
+# LBL: label color (dark for light themes)
+LBL=$'\e[38;2;80;80;80m'
+# DIMCIR: empty bar circles (visible on light themes)
+DIMCIR=$'\e[38;2;190;195;190m'
 
 # ── Configuration (env vars) ──
 SHOW_GIT="${CC_SHOW_GIT:-1}"
@@ -45,18 +50,10 @@ vis_len() {
 }
 
 row() {
-  local content="$1"
-  local vlen
-  vlen=$(vis_len "$content")
-  local pad=$((W - vlen))
-  [ "$pad" -lt 0 ] && pad=0
-  echo -e "${DIM}│${RST}${content}$(printf '%*s' "$pad" '')${DIM}│${RST}"
+  printf "%b\n" "$1"
 }
 
-HLINE=$(printf "%${W}s" '' | sed 's/ /─/g')
-HDIV="${DIM}┌${HLINE}┐${RST}"
-MDIV="${DIM}├${HLINE}┤${RST}"
-FDIV="${DIM}└${HLINE}┘${RST}"
+HLINE="${DIM}$(printf "%${W}s" '' | sed 's/ /─/g')${RST}"
 
 # ── Context Window ──
 PCT=$(jval '.context_window.used_percentage' '0' | cut -d. -f1)
@@ -72,7 +69,7 @@ elif [ "$PCT" -ge 50 ]; then CTX_CLR=$YEL
 else CTX_CLR=$GRN; fi
 
 FILLED=$((PCT * 30 / 100))
-BAR="${CTX_CLR}$(printf '%*s' "$FILLED" '' | sed 's/ /●/g')${DIM}$(printf '%*s' "$((30 - FILLED))" '' | sed 's/ /○/g')${RST}"
+BAR="${CTX_CLR}$(printf '%*s' "$FILLED" '' | sed 's/ /█/g')${DIMCIR}$(printf '%*s' "$((30 - FILLED))" '' | sed 's/ /░/g')${RST}"
 
 # ── Session Info ──
 TOTAL_COST=$(jval '.cost.total_cost_usd' '0')
@@ -107,7 +104,7 @@ if [ "$SHOW_GIT" != "0" ]; then
     if [ -n "$(git -C "$CWD" status --porcelain 2>/dev/null)" ]; then
       GIT_DIRTY="${RED}*${RST}"
     fi
-    GIT_INFO="  ${DIM}│${RST}  ${GRN}${GIT_BRANCH}${RST}${GIT_DIRTY}"
+    GIT_INFO="  ${GRN}${GIT_BRANCH}${RST}${GIT_DIRTY}"
   fi
 fi
 
@@ -116,10 +113,10 @@ EFFORT_INFO=""
 if [ "$SHOW_EFFORT" != "0" ]; then
   EFFORT=$(jq -r '.effortLevel // "default"' "$HOME/.claude/settings.json" 2>/dev/null)
   case "$EFFORT" in
-    high)   EFFORT_INFO="  ${DIM}│${RST}  ${MAG}● ${EFFORT}${RST}" ;;
-    medium) EFFORT_INFO="  ${DIM}│${RST}  ${DIM}◑ ${EFFORT}${RST}" ;;
-    low)    EFFORT_INFO="  ${DIM}│${RST}  ${DIM}◔ ${EFFORT}${RST}" ;;
-    *)      EFFORT_INFO="  ${DIM}│${RST}  ${DIM}◑ ${EFFORT}${RST}" ;;
+    high)   EFFORT_INFO="  ${MAG}● ${EFFORT}${RST}" ;;
+    medium) EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
+    low)    EFFORT_INFO="  ${LBL}◔ ${EFFORT}${RST}" ;;
+    *)      EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
   esac
 fi
 
@@ -139,7 +136,7 @@ if [ "$SHOW_SPEED" != "0" ]; then
       : # Context compaction — skip, cache will be overwritten below
     elif [ "$DELTA_T" -gt 0 ] && [ "$DELTA_O" -gt 0 ]; then
       SPEED=$(echo "scale=1; $DELTA_O * 1000 / $DELTA_T" | bc -l)
-      SPEED_INFO="  ${DIM}│${RST}  ${WHT}${SPEED} tok/s${RST}"
+      SPEED_INFO="  ${VAL}${SPEED} tok/s${RST}"
     fi
   fi
   printf '%s\n%s\n' "$CUR_OUT" "$NOW_MS" > "$SPEED_CACHE"
@@ -431,9 +428,9 @@ if [ "$SHOW_USAGE" != "0" ]; then
     if [ "$pct" -ge 90 ]; then clr=$RED
     elif [ "$pct" -ge 50 ]; then clr=$YEL
     else clr=$GRN; fi
-    local f=$(printf '%*s' "$filled" '' | sed 's/ /●/g')
-    local e=$(printf '%*s' "$empty" '' | sed 's/ /○/g')
-    echo -ne "${clr}${f}${DIM}${e}${RST}"
+    local f=$(printf '%*s' "$filled" '' | sed 's/ /█/g')
+    local e=$(printf '%*s' "$empty" '' | sed 's/ /░/g')
+    echo -ne "${clr}${f}${DIMCIR}${e}${RST}"
   }
 
   format_reset_time() {
@@ -470,7 +467,7 @@ if [ "$SHOW_USAGE" != "0" ]; then
     if jq -e '.five_hour' "$USAGE_CACHE" &>/dev/null; then
       [ "$CACHE_AGE" -lt 60 ] && NEEDS_FETCH=false
     else
-      [ "$CACHE_AGE" -lt 15 ] && NEEDS_FETCH=false
+      [ "$CACHE_AGE" -lt 300 ] && NEEDS_FETCH=false
     fi
     USAGE_DATA=$(cat "$USAGE_CACHE" 2>/dev/null)
   fi
@@ -507,40 +504,36 @@ if [ "$SHOW_USAGE" != "0" ]; then
     FIVE_CLR=$GRN; [ "$FIVE_PCT" -ge 50 ] && FIVE_CLR=$YEL; [ "$FIVE_PCT" -ge 90 ] && FIVE_CLR=$RED
     SEVEN_CLR=$GRN; [ "$SEVEN_PCT" -ge 50 ] && SEVEN_CLR=$YEL; [ "$SEVEN_PCT" -ge 90 ] && SEVEN_CLR=$RED
 
-    USAGE_LINE="  ${WHT}current${RST} ${FIVE_BAR} ${FIVE_CLR}${FIVE_PCT}%${RST}"
-    [ -n "$FIVE_RESET" ] && USAGE_LINE+=" ${DIM}⟳${RST} ${WHT}${FIVE_RESET}${RST}"
-    USAGE_LINE+="  ${DIM}│${RST}  ${WHT}weekly${RST} ${SEVEN_BAR} ${SEVEN_CLR}${SEVEN_PCT}%${RST}"
-    [ -n "$SEVEN_RESET" ] && USAGE_LINE+=" ${DIM}⟳${RST} ${WHT}${SEVEN_RESET}${RST}"
+    USAGE_LINE="  ${LBL}5-Hour${RST} ${FIVE_BAR} ${FIVE_CLR}${FIVE_PCT}%${RST}"
+    [ -n "$FIVE_RESET" ] && USAGE_LINE+=" ${LBL}⟳${RST} ${VAL}${FIVE_RESET}${RST}"
+    USAGE_LINE+="   ${LBL}Weekly${RST} ${SEVEN_BAR} ${SEVEN_CLR}${SEVEN_PCT}%${RST}"
+    [ -n "$SEVEN_RESET" ] && USAGE_LINE+=" ${LBL}⟳${RST} ${VAL}${SEVEN_RESET}${RST}"
   fi
 
 fi
 
 # ── Output ──
-echo -e "$HDIV"
-row "  CONTEXT  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${DIM}│${RST}  $(fmt_k $CTX_USED)/$(fmt_k $CTX_SIZE)"
-echo -e "$MDIV"
-row "  ${DIM}Cost:${RST} ${DIM}Cache${RST} \$${R_CACHE} ${DIM}Write${RST} \$${R_WRITE} ${DIM}Out${RST} \$${R_OUT} ${DIM}│${RST} ${DIM}API${RST} ${API_FMT} ${DIM}Max${RST} ${COST_FMT}"
-echo -e "$MDIV"
 SESSION_DISPLAY=""
 if [ "$SHOW_SESSION" != "0" ] && [ -n "$R_SESSION" ]; then
-  SESSION_DISPLAY="  ${DIM}·${RST}  ${WHT}${R_SESSION}${RST}"
+  SESSION_DISPLAY="  ${LBL}·${RST} ${VAL}${R_SESSION}${RST}"
 fi
-row "  ${BLU}${MODEL_NAME}${RST}  ${DIM}│${RST}  ${CYN}${PROJECT_NAME}${RST}  ${DIM}·${RST}  ${CWD_SHORT}${GIT_INFO}${SESSION_DISPLAY}"
-echo -e "$MDIV"
-row "  ${DIM}Duration:${RST} ${TIME_FMT}  ${DIM}│${RST}  ${DIM}CC:${RST} ${VERSION}${EFFORT_INFO}${SPEED_INFO}"
+printf "%b\n" "$HLINE"
+row "  ${BLU}${MODEL_NAME}${RST}  ${VAL}${CWD_SHORT}${RST}  ${GIT_INFO}${EFFORT_INFO}${SESSION_DISPLAY}"
+row "  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${VAL}$(fmt_k $CTX_USED)/$(fmt_k $CTX_SIZE)${RST}"
+row "  ${LBL}Duration${RST} ${VAL}${TIME_FMT}${RST}  ${LBL}CC${RST} ${VAL}${VERSION}${RST}${SPEED_INFO}"
+row "  ${LBL}Cache${RST} ${VAL}\$${R_CACHE}${RST}  ${LBL}Write${RST} ${VAL}\$${R_WRITE}${RST}  ${LBL}Out${RST} ${VAL}\$${R_OUT}${RST}   ${LBL}API${RST} ${VAL}${API_FMT}${RST}  ${LBL}Max${RST} ${VAL}${COST_FMT}${RST}"
 if [ -n "$USAGE_LINE" ]; then
-  echo -e "$MDIV"
   row "$USAGE_LINE"
 fi
-echo -e "$FDIV"
+printf "%b\n" "$HLINE"
 
 # ── Lower Section (frameless activity lines) ──
 if [ "$SHOW_TOOLS" != "0" ] && [ -n "$R_TOOLS" ]; then
-  echo -e "  ${R_TOOLS}"
+  printf "%b\n" "  ${R_TOOLS}"
 fi
 if [ "$SHOW_AGENTS" != "0" ] && [ -n "$R_AGENTS" ]; then
-  echo -e "  ${R_AGENTS}"
+  printf "%b\n" "  ${R_AGENTS}"
 fi
 if [ "$SHOW_TODOS" != "0" ] && [ -n "$R_TODOS" ]; then
-  echo -e "  ${R_TODOS}"
+  printf "%b\n" "  ${R_TODOS}"
 fi
