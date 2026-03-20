@@ -126,6 +126,12 @@ export CC_SHOW_TOOLS=1 CC_SHOW_AGENTS=1 CC_SHOW_TODOS=1
 
 Set `0` to disable, any other value to enable.
 
+### Known Limitations
+
+- **Effort level** reads from `~/.claude/settings.json` (persistent setting only). Session-only values like `max` and `auto` (set via `/effort`) are not exposed by Claude Code's statusline API, so they won't appear. Only `low`, `medium`, `high`, and `default` are shown.
+- **Tool/Agent/Todo tracking** only shows data when Claude is actively using tools, dispatching agents, or managing tasks. Enable with `CC_SHOW_TOOLS=1 CC_SHOW_AGENTS=1 CC_SHOW_TODOS=1` and ask Claude to perform actions that trigger these features.
+- **Rate limits** require a Pro/Max/Team subscription with OAuth login (not API key). The usage API may be temporarily rate-limited; results are cached for 60 seconds on success and 5 minutes on failure.
+
 ## License
 
 MIT

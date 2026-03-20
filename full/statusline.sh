@@ -113,7 +113,7 @@ EFFORT_INFO=""
 if [ "$SHOW_EFFORT" != "0" ]; then
   EFFORT=$(jq -r '.effortLevel // "default"' "$HOME/.claude/settings.json" 2>/dev/null)
   case "$EFFORT" in
-    high)   EFFORT_INFO="  ${MAG}● ${EFFORT}${RST}" ;;
+    high)   EFFORT_INFO="  ${LBL}● ${EFFORT}${RST}" ;;
     medium) EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
     low)    EFFORT_INFO="  ${LBL}◔ ${EFFORT}${RST}" ;;
     *)      EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
