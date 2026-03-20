@@ -14,7 +14,7 @@ A Claude Code statusline that shows context window usage, cost breakdown, and se
 ## Quick Install
 
 ```bash
-git clone https://github.com/sirkhet-dev/cc-statusline.git
+git clone https://github.com/efecanbasoz/cc-statusline.git
 cd cc-statusline
 ./install.sh                # interactive — choose slim or full
 ./install.sh --edition full # direct full install
@@ -25,7 +25,7 @@ cd cc-statusline
 1. Download the script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sirkhet-dev/cc-statusline/main/slim/statusline.sh -o ~/.claude/statusline.sh
+curl -fsSL https://raw.githubusercontent.com/efecanbasoz/cc-statusline/main/slim/statusline.sh -o ~/.claude/statusline.sh
 ```
 
 2. Make it executable:
