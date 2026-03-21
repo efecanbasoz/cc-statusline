@@ -2,3 +2,7 @@
 *.bak
 *.swp
 *~
+
+# Codex scan results
+security-scan-results.md
+quality-scan-results.md

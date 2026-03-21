@@ -156,11 +156,13 @@ do_uninstall() {
             jq --argjson sl "$backup_val" '.statusLine = $sl' "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
             rm "$CONFIG_BACKUP"
             info "Restored previous statusLine config"
-        else
+        elif jq -e --argjson sl "$STATUSLINE_VALUE" '.statusLine == $sl' "$SETTINGS_FILE" >/dev/null 2>&1; then
             local tmp
             tmp=$(mktemp)
             jq 'del(.statusLine)' "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
             info "Removed statusLine from settings.json"
+        else
+            warn "statusLine config does not match cc-statusline, leaving it untouched"
         fi
     fi
 
