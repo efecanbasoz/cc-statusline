@@ -20,6 +20,13 @@ mkdir -p "$CACHE_DIR"
 # ── Helpers ──
 # SEC-001: Validate numeric values before arithmetic to prevent injection
 safe_int() { [[ $1 =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf '0'; }
+
+# SEC-005: Sanitize untrusted strings to prevent terminal escape injection
+sanitize_tty() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\011\013\014\016-\037\177' | \
+    sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/\x1B\\][^\a]*(\a|\x1B\\\\)//g'
+}
+
 fmt_k() {
   local v=$1
   if [ "$v" -ge 1000000 ] 2>/dev/null; then
@@ -53,13 +60,33 @@ HDIV="${DIM}┌${HLINE}┐${RST}"
 MDIV="${DIM}├${HLINE}┤${RST}"
 FDIV="${DIM}└${HLINE}┘${RST}"
 
+# QA-002: Extract all values in a single jq call to avoid repeated process spawns
+_ALL=$(echo "$input" | jq -r '[
+  (.context_window.used_percentage // 0 | floor),
+  (.context_window.context_window_size // 1000000),
+  (.context_window.current_usage.input_tokens // 0),
+  (.context_window.current_usage.output_tokens // 0),
+  (.context_window.current_usage.cache_creation_input_tokens // 0),
+  (.context_window.current_usage.cache_read_input_tokens // 0),
+  (.cost.total_cost_usd // 0),
+  (.cost.total_duration_ms // 0),
+  (.transcript_path // ""),
+  (.session_id // ""),
+  (.model.display_name // "?"),
+  (.version // "?"),
+  (.cwd // "?"),
+  (.workspace.project_dir // "?")
+] | .[]')
+
+_line() { echo "$_ALL" | sed -n "${1}p"; }
+
 # ── Context Window (SEC-001: all values validated before arithmetic) ──
-PCT=$(safe_int "$(jval '.context_window.used_percentage' '0' | cut -d. -f1)")
-CTX_SIZE=$(safe_int "$(jval '.context_window.context_window_size' '1000000')")
-CUR_IN=$(safe_int "$(jval '.context_window.current_usage.input_tokens' '0')")
-CUR_OUT=$(safe_int "$(jval '.context_window.current_usage.output_tokens' '0')")
-CACHE_WR=$(safe_int "$(jval '.context_window.current_usage.cache_creation_input_tokens' '0')")
-CACHE_RD=$(safe_int "$(jval '.context_window.current_usage.cache_read_input_tokens' '0')")
+PCT=$(safe_int "$(_line 1)")
+CTX_SIZE=$(safe_int "$(_line 2)")
+CUR_IN=$(safe_int "$(_line 3)")
+CUR_OUT=$(safe_int "$(_line 4)")
+CACHE_WR=$(safe_int "$(_line 5)")
+CACHE_RD=$(safe_int "$(_line 6)")
 CTX_USED=$((CUR_IN + CUR_OUT + CACHE_WR + CACHE_RD))
 
 if [ "$PCT" -ge 80 ]; then CTX_CLR=$RED
@@ -70,12 +97,12 @@ FILLED=$((PCT * 30 / 100))
 BAR="${CTX_CLR}$(printf '%*s' "$FILLED" '' | sed 's/ /▰/g')${DIM}$(printf '%*s' "$((30 - FILLED))" '' | sed 's/ /▱/g')${RST}"
 
 # ── Session Info ──
-TOTAL_COST=$(jval '.cost.total_cost_usd' '0')
-DUR_MS=$(safe_int "$(jval '.cost.total_duration_ms' '0')")
-TRANSCRIPT=$(jval '.transcript_path' '""')
-SESSION_ID=$(jval '.session_id' '""')
-MODEL_NAME=$(jval '.model.display_name' '"?"')
-VERSION=$(jval '.version' '"?"')
+TOTAL_COST=$(_line 7)
+DUR_MS=$(safe_int "$(_line 8)")
+TRANSCRIPT=$(_line 9)
+SESSION_ID=$(_line 10)
+MODEL_NAME=$(sanitize_tty "$(_line 11)")
+VERSION=$(_line 12)
 
 COST_FMT=$(printf '$%.2f' "$TOTAL_COST")
 DAYS=$((DUR_MS / 86400000))
@@ -88,10 +115,10 @@ TIME_FMT=""
 [ "$MINS" -gt 0 ] && TIME_FMT="${TIME_FMT}${MINS}m "
 TIME_FMT="${TIME_FMT}${SECS}s"
 
-CWD=$(jval '.cwd' '"?"')
-PROJECT_DIR=$(jval '.workspace.project_dir' '"?"')
-PROJECT_NAME=$(basename "$PROJECT_DIR")
-CWD_SHORT=$(echo "$CWD" | sed "s|$HOME|~|")
+CWD=$(_line 13)
+PROJECT_DIR=$(_line 14)
+PROJECT_NAME=$(sanitize_tty "$(basename "$PROJECT_DIR")")
+CWD_SHORT=$(sanitize_tty "$(echo "$CWD" | sed "s|$HOME|~|")")
 
 # ── Cost Breakdown (transcript parse with 5s cache) ──
 # SEC-003: Hash session ID to prevent path traversal

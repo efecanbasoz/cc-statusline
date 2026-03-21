@@ -37,6 +37,14 @@ mkdir -p "$CACHE_DIR"
 # ── Helpers ──
 # SEC-001: Validate numeric values before arithmetic to prevent injection
 safe_int() { [[ $1 =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf '0'; }
+
+# SEC-005: Sanitize untrusted strings to prevent terminal escape injection.
+# Strips ANSI escape sequences, OSC sequences, and control characters.
+sanitize_tty() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\011\013\014\016-\037\177' | \
+    sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/\x1B\\][^\a]*(\a|\x1B\\\\)//g'
+}
+
 fmt_k() {
   local v=$1
   if [ "$v" -ge 1000000 ] 2>/dev/null; then
@@ -83,7 +91,8 @@ TOTAL_COST=$(jval '.cost.total_cost_usd' '0')
 DUR_MS=$(safe_int "$(jval '.cost.total_duration_ms' '0')")
 TRANSCRIPT=$(jval '.transcript_path' '""')
 SESSION_ID=$(jval '.session_id' '""')
-MODEL_NAME=$(jval '.model.display_name' '"?"')
+# SEC-005: Sanitize untrusted display strings from JSON input
+MODEL_NAME=$(sanitize_tty "$(jval '.model.display_name' '"?"')")
 VERSION=$(jval '.version' '"?"')
 
 COST_FMT=$(printf '$%.2f' "$TOTAL_COST")
@@ -99,8 +108,8 @@ TIME_FMT="${TIME_FMT}${SECS}s"
 
 CWD=$(jval '.cwd' '"?"')
 PROJECT_DIR=$(jval '.workspace.project_dir' '"?"')
-PROJECT_NAME=$(basename "$PROJECT_DIR")
-CWD_SHORT=$(echo "$CWD" | sed "s|$HOME|~|")
+PROJECT_NAME=$(sanitize_tty "$(basename "$PROJECT_DIR")")
+CWD_SHORT=$(sanitize_tty "$(echo "$CWD" | sed "s|$HOME|~|")")
 
 # ── Git Info ──
 GIT_INFO=""
@@ -389,6 +398,12 @@ fi
 : "${R_CACHE:=0.00}" "${R_WRITE:=0.00}" "${R_OUT:=0.00}" "${R_API:=0.00}"
 : "${R_TOOLS:=}" "${R_AGENTS:=}" "${R_TODOS:=}" "${R_SESSION:=}"
 
+# SEC-005: Sanitize transcript-derived display strings
+R_TOOLS=$(sanitize_tty "$R_TOOLS")
+R_AGENTS=$(sanitize_tty "$R_AGENTS")
+R_TODOS=$(sanitize_tty "$R_TODOS")
+R_SESSION=$(sanitize_tty "$R_SESSION")
+
 API_FMT=$(printf '$%.2f' "$R_API")
 
 # ── Usage / Rate Limits ──
@@ -487,10 +502,13 @@ if [ "$SHOW_USAGE" != "0" ]; then
   if $NEEDS_FETCH; then
     TOKEN=$(get_oauth_token)
     if [ -n "$TOKEN" ]; then
-      RESP=$(curl -s --max-time 5 \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "anthropic-beta: oauth-2025-04-20" \
+      # SEC-004: Use curl config file (-K) to keep token out of argv (visible in ps)
+      CURL_CFG="${CACHE_DIR}/cc-curl-cfg.$$"
+      printf -- '-H "Authorization: Bearer %s"\n-H "anthropic-beta: oauth-2025-04-20"\n' "$TOKEN" > "$CURL_CFG"
+      chmod 600 "$CURL_CFG" 2>/dev/null
+      RESP=$(curl -s --max-time 5 -K "$CURL_CFG" \
         "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+      rm -f "$CURL_CFG"
       if [ -n "$RESP" ] && echo "$RESP" | jq -e '.five_hour' &>/dev/null; then
         USAGE_DATA="$RESP"
         echo "$RESP" > "$USAGE_CACHE"
