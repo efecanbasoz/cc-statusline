@@ -1,4 +1,5 @@
 #!/bin/bash
+set -u -o pipefail
 input=$(cat)
 
 # ── Colors (true color, ANSI-C quoting for real ESC bytes) ──
@@ -7,7 +8,6 @@ YEL=$'\e[38;2;230;200;0m'
 GRN=$'\e[38;2;0;175;80m'
 CYN=$'\e[38;2;86;182;194m'
 BLU=$'\e[38;2;0;153;255m'
-MAG=$'\e[38;2;180;140;255m'
 # VAL: value color (orange for contrast on light themes)
 VAL=$'\e[38;2;230;140;50m'
 DIM=$'\e[2m'
@@ -29,7 +29,14 @@ SHOW_SESSION="${CC_SHOW_SESSION:-0}"
 
 W=72
 
+# ── Cache directory (SEC-002: per-user, private) ──
+CACHE_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cc-statusline"
+umask 077
+mkdir -p "$CACHE_DIR"
+
 # ── Helpers ──
+# SEC-001: Validate numeric values before arithmetic to prevent injection
+safe_int() { [[ $1 =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf '0'; }
 fmt_k() {
   local v=$1
   if [ "$v" -ge 1000000 ] 2>/dev/null; then
@@ -55,13 +62,13 @@ row() {
 
 HLINE="${DIM}$(printf "%${W}s" '' | sed 's/ /─/g')${RST}"
 
-# ── Context Window ──
-PCT=$(jval '.context_window.used_percentage' '0' | cut -d. -f1)
-CTX_SIZE=$(jval '.context_window.context_window_size' '1000000')
-CUR_IN=$(jval '.context_window.current_usage.input_tokens' '0')
-CUR_OUT=$(jval '.context_window.current_usage.output_tokens' '0')
-CACHE_WR=$(jval '.context_window.current_usage.cache_creation_input_tokens' '0')
-CACHE_RD=$(jval '.context_window.current_usage.cache_read_input_tokens' '0')
+# ── Context Window (SEC-001: all values validated before arithmetic) ──
+PCT=$(safe_int "$(jval '.context_window.used_percentage' '0' | cut -d. -f1)")
+CTX_SIZE=$(safe_int "$(jval '.context_window.context_window_size' '1000000')")
+CUR_IN=$(safe_int "$(jval '.context_window.current_usage.input_tokens' '0')")
+CUR_OUT=$(safe_int "$(jval '.context_window.current_usage.output_tokens' '0')")
+CACHE_WR=$(safe_int "$(jval '.context_window.current_usage.cache_creation_input_tokens' '0')")
+CACHE_RD=$(safe_int "$(jval '.context_window.current_usage.cache_read_input_tokens' '0')")
 CTX_USED=$((CUR_IN + CUR_OUT + CACHE_WR + CACHE_RD))
 
 if [ "$PCT" -ge 80 ]; then CTX_CLR=$RED
@@ -73,7 +80,7 @@ BAR="${CTX_CLR}$(printf '%*s' "$FILLED" '' | sed 's/ /█/g')${DIMCIR}$(printf '
 
 # ── Session Info ──
 TOTAL_COST=$(jval '.cost.total_cost_usd' '0')
-DUR_MS=$(jval '.cost.total_duration_ms' '0')
+DUR_MS=$(safe_int "$(jval '.cost.total_duration_ms' '0')")
 TRANSCRIPT=$(jval '.transcript_path' '""')
 SESSION_ID=$(jval '.session_id' '""')
 MODEL_NAME=$(jval '.model.display_name' '"?"')
@@ -124,12 +131,14 @@ fi
 # Note: CUR_OUT is context-window-scoped output tokens, not cumulative session total.
 # Speed readings reset after context compaction. This is a known limitation.
 SPEED_INFO=""
+# SEC-003: Hash session ID to prevent path traversal
+SESSION_KEY=$(printf '%s' "$SESSION_ID" | sha256sum | cut -c1-16)
 if [ "$SHOW_SPEED" != "0" ]; then
-  SPEED_CACHE="/tmp/claude/cc-speed-${SESSION_ID}.dat"
+  SPEED_CACHE="${CACHE_DIR}/cc-speed-${SESSION_KEY}.dat"
   NOW_MS=$(($(date +%s) * 1000))
   if [ -f "$SPEED_CACHE" ]; then
-    PREV_OUT=$(sed -n '1p' "$SPEED_CACHE")
-    PREV_MS=$(sed -n '2p' "$SPEED_CACHE")
+    PREV_OUT=$(safe_int "$(sed -n '1p' "$SPEED_CACHE")")
+    PREV_MS=$(safe_int "$(sed -n '2p' "$SPEED_CACHE")")
     DELTA_T=$((NOW_MS - PREV_MS))
     DELTA_O=$((CUR_OUT - PREV_OUT))
     if [ "$DELTA_O" -lt 0 ]; then
@@ -143,8 +152,7 @@ if [ "$SHOW_SPEED" != "0" ]; then
 fi
 
 # ── Cost Breakdown (transcript parse with 5s cache) ──
-mkdir -p /tmp/claude
-CACHE_FILE="/tmp/claude/cc-cost-${SESSION_ID}.dat"
+CACHE_FILE="${CACHE_DIR}/cc-cost-${SESSION_KEY}.dat"
 PARSE=1
 if [ -f "$CACHE_FILE" ]; then
   CACHE_MOD=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
@@ -198,7 +206,7 @@ with open(transcript) as f:
     for line in f:
         try:
             e = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
 
         # Session name
@@ -398,7 +406,13 @@ if [ "$SHOW_USAGE" != "0" ]; then
     # 2. Linux keychain
     if command -v secret-tool &>/dev/null; then
       local blob
-      blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+      local timeout_bin
+      timeout_bin=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+      if [ -n "$timeout_bin" ]; then
+        blob=$("$timeout_bin" 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+      else
+        blob=$(secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+      fi
       if [ -n "$blob" ]; then
         token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
         if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
@@ -454,7 +468,7 @@ if [ "$SHOW_USAGE" != "0" ]; then
   }
 
   # Fetch usage with caching (60s success, 15s failure)
-  USAGE_CACHE="/tmp/claude/cc-usage-cache.json"
+  USAGE_CACHE="${CACHE_DIR}/cc-usage-cache.json"
   USAGE_DATA=""
   NEEDS_FETCH=true
 
@@ -489,12 +503,12 @@ if [ "$SHOW_USAGE" != "0" ]; then
 
   # Build usage panel content
   if [ -n "$USAGE_DATA" ] && echo "$USAGE_DATA" | jq -e '.five_hour' &>/dev/null; then
-    FIVE_PCT=$(echo "$USAGE_DATA" | jq -r '.five_hour.utilization // 0' | cut -d. -f1)
+    FIVE_PCT=$(safe_int "$(echo "$USAGE_DATA" | jq -r '.five_hour.utilization // 0' | cut -d. -f1)")
     FIVE_RESET_ISO=$(echo "$USAGE_DATA" | jq -r '.five_hour.resets_at // empty')
     FIVE_RESET=$(format_reset_time "$FIVE_RESET_ISO" "time")
     FIVE_BAR=$(build_usage_bar "$FIVE_PCT")
 
-    SEVEN_PCT=$(echo "$USAGE_DATA" | jq -r '.seven_day.utilization // 0' | cut -d. -f1)
+    SEVEN_PCT=$(safe_int "$(echo "$USAGE_DATA" | jq -r '.seven_day.utilization // 0' | cut -d. -f1)")
     SEVEN_RESET_ISO=$(echo "$USAGE_DATA" | jq -r '.seven_day.resets_at // empty')
     SEVEN_RESET=$(format_reset_time "$SEVEN_RESET_ISO" "datetime")
     SEVEN_BAR=$(build_usage_bar "$SEVEN_PCT")

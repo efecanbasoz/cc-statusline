@@ -1,4 +1,5 @@
 #!/bin/bash
+set -u -o pipefail
 input=$(cat)
 
 # ── Colors ──
@@ -11,7 +12,14 @@ RST="\033[0m"
 
 W=72
 
+# ── Cache directory (SEC-002: per-user, private) ──
+CACHE_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cc-statusline"
+umask 077
+mkdir -p "$CACHE_DIR"
+
 # ── Helpers ──
+# SEC-001: Validate numeric values before arithmetic to prevent injection
+safe_int() { [[ $1 =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf '0'; }
 fmt_k() {
   local v=$1
   if [ "$v" -ge 1000000 ] 2>/dev/null; then
@@ -45,13 +53,13 @@ HDIV="${DIM}┌${HLINE}┐${RST}"
 MDIV="${DIM}├${HLINE}┤${RST}"
 FDIV="${DIM}└${HLINE}┘${RST}"
 
-# ── Context Window ──
-PCT=$(jval '.context_window.used_percentage' '0' | cut -d. -f1)
-CTX_SIZE=$(jval '.context_window.context_window_size' '1000000')
-CUR_IN=$(jval '.context_window.current_usage.input_tokens' '0')
-CUR_OUT=$(jval '.context_window.current_usage.output_tokens' '0')
-CACHE_WR=$(jval '.context_window.current_usage.cache_creation_input_tokens' '0')
-CACHE_RD=$(jval '.context_window.current_usage.cache_read_input_tokens' '0')
+# ── Context Window (SEC-001: all values validated before arithmetic) ──
+PCT=$(safe_int "$(jval '.context_window.used_percentage' '0' | cut -d. -f1)")
+CTX_SIZE=$(safe_int "$(jval '.context_window.context_window_size' '1000000')")
+CUR_IN=$(safe_int "$(jval '.context_window.current_usage.input_tokens' '0')")
+CUR_OUT=$(safe_int "$(jval '.context_window.current_usage.output_tokens' '0')")
+CACHE_WR=$(safe_int "$(jval '.context_window.current_usage.cache_creation_input_tokens' '0')")
+CACHE_RD=$(safe_int "$(jval '.context_window.current_usage.cache_read_input_tokens' '0')")
 CTX_USED=$((CUR_IN + CUR_OUT + CACHE_WR + CACHE_RD))
 
 if [ "$PCT" -ge 80 ]; then CTX_CLR=$RED
@@ -63,7 +71,7 @@ BAR="${CTX_CLR}$(printf '%*s' "$FILLED" '' | sed 's/ /▰/g')${DIM}$(printf '%*s
 
 # ── Session Info ──
 TOTAL_COST=$(jval '.cost.total_cost_usd' '0')
-DUR_MS=$(jval '.cost.total_duration_ms' '0')
+DUR_MS=$(safe_int "$(jval '.cost.total_duration_ms' '0')")
 TRANSCRIPT=$(jval '.transcript_path' '""')
 SESSION_ID=$(jval '.session_id' '""')
 MODEL_NAME=$(jval '.model.display_name' '"?"')
@@ -86,8 +94,9 @@ PROJECT_NAME=$(basename "$PROJECT_DIR")
 CWD_SHORT=$(echo "$CWD" | sed "s|$HOME|~|")
 
 # ── Cost Breakdown (transcript parse with 5s cache) ──
-mkdir -p /tmp/claude
-CACHE_FILE="/tmp/claude/cc-cost-${SESSION_ID}.dat"
+# SEC-003: Hash session ID to prevent path traversal
+SESSION_KEY=$(printf '%s' "$SESSION_ID" | sha256sum | cut -c1-16)
+CACHE_FILE="${CACHE_DIR}/cc-cost-${SESSION_KEY}.dat"
 PARSE=1
 if [ -f "$CACHE_FILE" ]; then
   CACHE_MOD=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
@@ -103,7 +112,7 @@ transcript = os.environ.get("TRANSCRIPT_PATH", "")
 total_cost = float(os.environ.get("TOTAL_COST_USD", "0"))
 
 if not transcript or not os.path.isfile(transcript) or total_cost <= 0:
-    print("0\n0\n0\n0.00\n0.00\n0.00")
+    print("0.00\n0.00\n0.00\n0.00")
     sys.exit(0)
 
 # API rate weights (relative pricing structure per MTok)
@@ -129,7 +138,7 @@ with open(transcript) as f:
             msg = e.get("message", {})
             if msg.get("usage") and msg.get("id"):
                 by_id[msg["id"]] = msg
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             pass
 
 # Calculate API costs directly
