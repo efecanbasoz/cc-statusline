@@ -30,9 +30,13 @@ SHOW_SESSION="${CC_SHOW_SESSION:-0}"
 W=72
 
 # ── Cache directory (SEC-002: per-user, private) ──
+# SEC-006: Validate ownership to prevent pre-creation / symlink attacks on /tmp
 CACHE_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cc-statusline"
 umask 077
 mkdir -p "$CACHE_DIR"
+if [ "$(stat -c %u "$CACHE_DIR" 2>/dev/null || stat -f %u "$CACHE_DIR" 2>/dev/null)" != "$(id -u)" ]; then
+  CACHE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-statusline-XXXXXXXX")
+fi
 
 # ── Helpers ──
 # SEC-001: Validate numeric values before arithmetic to prevent injection
@@ -93,7 +97,8 @@ TRANSCRIPT=$(jval '.transcript_path' '""')
 SESSION_ID=$(jval '.session_id' '""')
 # SEC-005: Sanitize untrusted display strings from JSON input
 MODEL_NAME=$(sanitize_tty "$(jval '.model.display_name' '"?"')")
-VERSION=$(jval '.version' '"?"')
+# SEC-008: Sanitize version string from JSON input
+VERSION=$(sanitize_tty "$(jval '.version' '"?"')")
 
 COST_FMT=$(printf '$%.2f' "$TOTAL_COST")
 DAYS=$((DUR_MS / 86400000))
@@ -398,6 +403,11 @@ fi
 : "${R_CACHE:=0.00}" "${R_WRITE:=0.00}" "${R_OUT:=0.00}" "${R_API:=0.00}"
 : "${R_TOOLS:=}" "${R_AGENTS:=}" "${R_TODOS:=}" "${R_SESSION:=}"
 
+# SEC-009: Validate numeric cache values to prevent injection via tampered cache files
+safe_dec() { [[ $1 =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && printf '%s' "$1" || printf '0.00'; }
+R_CACHE=$(safe_dec "$R_CACHE"); R_WRITE=$(safe_dec "$R_WRITE")
+R_OUT=$(safe_dec "$R_OUT"); R_API=$(safe_dec "$R_API")
+
 # SEC-005: Sanitize transcript-derived display strings
 R_TOOLS=$(sanitize_tty "$R_TOOLS")
 R_AGENTS=$(sanitize_tty "$R_AGENTS")
@@ -503,12 +513,15 @@ if [ "$SHOW_USAGE" != "0" ]; then
     TOKEN=$(get_oauth_token)
     if [ -n "$TOKEN" ]; then
       # SEC-004: Use curl config file (-K) to keep token out of argv (visible in ps)
-      CURL_CFG="${CACHE_DIR}/cc-curl-cfg.$$"
+      # SEC-007: Use mktemp for unpredictable name; trap ensures cleanup on signal
+      CURL_CFG=$(mktemp "${CACHE_DIR}/cc-curl-cfg-XXXXXXXX")
+      trap 'rm -f "$CURL_CFG"' EXIT INT TERM
       printf -- '-H "Authorization: Bearer %s"\n-H "anthropic-beta: oauth-2025-04-20"\n' "$TOKEN" > "$CURL_CFG"
       chmod 600 "$CURL_CFG" 2>/dev/null
       RESP=$(curl -s --max-time 5 -K "$CURL_CFG" \
         "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
       rm -f "$CURL_CFG"
+      trap - EXIT INT TERM
       if [ -n "$RESP" ] && echo "$RESP" | jq -e '.five_hour' &>/dev/null; then
         USAGE_DATA="$RESP"
         echo "$RESP" > "$USAGE_CACHE"
