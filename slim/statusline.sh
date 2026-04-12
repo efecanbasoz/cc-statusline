@@ -13,9 +13,13 @@ RST="\033[0m"
 W=72
 
 # ── Cache directory (SEC-002: per-user, private) ──
+# SEC-006: Validate ownership to prevent pre-creation / symlink attacks on /tmp
 CACHE_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cc-statusline"
 umask 077
 mkdir -p "$CACHE_DIR"
+if [ "$(stat -c %u "$CACHE_DIR" 2>/dev/null || stat -f %u "$CACHE_DIR" 2>/dev/null)" != "$(id -u)" ]; then
+  CACHE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-statusline-XXXXXXXX")
+fi
 
 # ── Helpers ──
 # SEC-001: Validate numeric values before arithmetic to prevent injection
@@ -102,7 +106,8 @@ DUR_MS=$(safe_int "$(_line 8)")
 TRANSCRIPT=$(_line 9)
 SESSION_ID=$(_line 10)
 MODEL_NAME=$(sanitize_tty "$(_line 11)")
-VERSION=$(_line 12)
+# SEC-008: Sanitize version string from JSON input
+VERSION=$(sanitize_tty "$(_line 12)")
 
 COST_FMT=$(printf '$%.2f' "$TOTAL_COST")
 DAYS=$((DUR_MS / 86400000))
@@ -210,6 +215,11 @@ fi
 
 # Defaults
 : "${R_CACHE:=0.00}" "${R_WRITE:=0.00}" "${R_OUT:=0.00}" "${R_API:=0.00}"
+
+# SEC-009: Validate numeric cache values to prevent injection via tampered cache files
+safe_dec() { [[ $1 =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && printf '%s' "$1" || printf '0.00'; }
+R_CACHE=$(safe_dec "$R_CACHE"); R_WRITE=$(safe_dec "$R_WRITE")
+R_OUT=$(safe_dec "$R_OUT"); R_API=$(safe_dec "$R_API")
 
 API_FMT=$(printf '$%.2f' "$R_API")
 
