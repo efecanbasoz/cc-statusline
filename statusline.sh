@@ -95,6 +95,7 @@ TOTAL_COST=$(jval '.cost.total_cost_usd' '0')
 DUR_MS=$(safe_int "$(jval '.cost.total_duration_ms' '0')")
 TRANSCRIPT=$(jval '.transcript_path' '""')
 SESSION_ID=$(jval '.session_id' '""')
+SESSION_NAME=$(jval '.session_name' '""')
 # SEC-005: Sanitize untrusted display strings from JSON input
 MODEL_NAME=$(sanitize_tty "$(jval '.model.display_name' '"?"')")
 # SEC-008: Sanitize version string from JSON input
@@ -129,15 +130,15 @@ if [ "$SHOW_GIT" != "0" ]; then
   fi
 fi
 
-# ── Effort Level ──
+# ── Effort Level (from stdin, supports xhigh/max) ──
 EFFORT_INFO=""
 if [ "$SHOW_EFFORT" != "0" ]; then
-  EFFORT=$(jq -r '.effortLevel // "default"' "$HOME/.claude/settings.json" 2>/dev/null)
+  EFFORT=$(jval '.effort.level' '')
   case "$EFFORT" in
-    high)   EFFORT_INFO="  ${LBL}● ${EFFORT}${RST}" ;;
-    medium) EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
-    low)    EFFORT_INFO="  ${LBL}◔ ${EFFORT}${RST}" ;;
-    *)      EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
+    high|xhigh|max) EFFORT_INFO="  ${LBL}● ${EFFORT}${RST}" ;;
+    medium)         EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
+    low)            EFFORT_INFO="  ${LBL}◔ ${EFFORT}${RST}" ;;
+    *)              EFFORT_INFO="  ${LBL}◑ ${EFFORT}${RST}" ;;
   esac
 fi
 
@@ -145,8 +146,17 @@ fi
 # Note: CUR_OUT is context-window-scoped output tokens, not cumulative session total.
 # Speed readings reset after context compaction. This is a known limitation.
 SPEED_INFO=""
-# SEC-003: Hash session ID to prevent path traversal
-SESSION_KEY=$(printf '%s' "$SESSION_ID" | sha256sum | cut -c1-16)
+# SEC-003: Hash session ID to prevent path traversal; cross-platform hash (F-001 fix)
+_session_hash() {
+  if command -v shasum &>/dev/null; then
+    shasum -a 256 | cut -d' ' -f1 | cut -c1-16
+  elif command -v sha256sum &>/dev/null; then
+    sha256sum | cut -c1-16
+  else
+    md5sum 2>/dev/null | cut -c1-16 || printf '%016d' "$$"
+  fi
+}
+SESSION_KEY=$(printf '%s' "$SESSION_ID" | _session_hash)
 if [ "$SHOW_SPEED" != "0" ]; then
   SPEED_CACHE="${CACHE_DIR}/cc-speed-${SESSION_KEY}.dat"
   NOW_MS=$(($(date +%s) * 1000))
@@ -177,7 +187,7 @@ fi
 if [ "$PARSE" -eq 1 ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
   COST_DATA=$(TRANSCRIPT_PATH="$TRANSCRIPT" TOTAL_COST_USD="$TOTAL_COST" \
     SHOW_TOOLS="$SHOW_TOOLS" SHOW_AGENTS="$SHOW_AGENTS" \
-    SHOW_TODOS="$SHOW_TODOS" SHOW_SESSION="$SHOW_SESSION" python3 << 'PYEOF'
+    SHOW_TODOS="$SHOW_TODOS" python3 << 'PYEOF'
 import json, sys, os
 from collections import defaultdict
 
@@ -186,12 +196,11 @@ total_cost = float(os.environ.get("TOTAL_COST_USD", "0"))
 show_tools = os.environ.get("SHOW_TOOLS", "0") != "0"
 show_agents = os.environ.get("SHOW_AGENTS", "0") != "0"
 show_todos = os.environ.get("SHOW_TODOS", "0") != "0"
-show_session = os.environ.get("SHOW_SESSION", "0") != "0"
 
-# 8 output lines always emitted
-out = ["0.00", "0.00", "0.00", "0.00", "", "", "", ""]
+# 7 output lines always emitted
+out = ["0.00", "0.00", "0.00", "0.00", "", "", ""]
 
-if not transcript or not os.path.isfile(transcript):
+if not transcript or not os.path.isfile(transcript) or total_cost <= 0:
     print("\n".join(out))
     sys.exit(0)
 
@@ -213,7 +222,6 @@ by_id = {}
 tools = {}
 agents = {}
 todos = []
-session_name = ""
 task_id_map = {}
 
 with open(transcript) as f:
@@ -222,14 +230,6 @@ with open(transcript) as f:
             e = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
-
-        # Session name
-        if show_session:
-            if e.get("type") == "custom-title" and isinstance(e.get("customTitle"), str):
-                session_name = e["customTitle"]
-            elif isinstance(e.get("slug"), str):
-                if not session_name:
-                    session_name = e["slug"]
 
         msg = e.get("message", {})
         if msg.get("usage") and msg.get("id"):
@@ -367,10 +367,6 @@ if show_todos and todos:
         name = current["content"][:35]
         out[6] = f"\u25b8 {name} ({completed}/{total})"
 
-# Session name
-if show_session and session_name:
-    out[7] = session_name
-
 print("\n".join(out))
 PYEOF
   )
@@ -383,8 +379,7 @@ PYEOF
     R_TOOLS=$(echo "$COST_DATA" | sed -n '5p')
     R_AGENTS=$(echo "$COST_DATA" | sed -n '6p')
     R_TODOS=$(echo "$COST_DATA" | sed -n '7p')
-    R_SESSION=$(echo "$COST_DATA" | sed -n '8p')
-    printf '%s\n' "$R_CACHE" "$R_WRITE" "$R_OUT" "$R_API" "$R_TOOLS" "$R_AGENTS" "$R_TODOS" "$R_SESSION" > "$CACHE_FILE"
+    printf '%s\n' "$R_CACHE" "$R_WRITE" "$R_OUT" "$R_API" "$R_TOOLS" "$R_AGENTS" "$R_TODOS" > "$CACHE_FILE"
   fi
 else
   if [ -f "$CACHE_FILE" ]; then
@@ -395,13 +390,12 @@ else
     R_TOOLS=$(sed -n '5p' "$CACHE_FILE")
     R_AGENTS=$(sed -n '6p' "$CACHE_FILE")
     R_TODOS=$(sed -n '7p' "$CACHE_FILE")
-    R_SESSION=$(sed -n '8p' "$CACHE_FILE")
   fi
 fi
 
 # Defaults
 : "${R_CACHE:=0.00}" "${R_WRITE:=0.00}" "${R_OUT:=0.00}" "${R_API:=0.00}"
-: "${R_TOOLS:=}" "${R_AGENTS:=}" "${R_TODOS:=}" "${R_SESSION:=}"
+: "${R_TOOLS:=}" "${R_AGENTS:=}" "${R_TODOS:=}"
 
 # SEC-009: Validate numeric cache values to prevent injection via tampered cache files
 safe_dec() { [[ $1 =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && printf '%s' "$1" || printf '0.00'; }
@@ -412,48 +406,12 @@ R_OUT=$(safe_dec "$R_OUT"); R_API=$(safe_dec "$R_API")
 R_TOOLS=$(sanitize_tty "$R_TOOLS")
 R_AGENTS=$(sanitize_tty "$R_AGENTS")
 R_TODOS=$(sanitize_tty "$R_TODOS")
-R_SESSION=$(sanitize_tty "$R_SESSION")
 
 API_FMT=$(printf '$%.2f' "$R_API")
 
-# ── Usage / Rate Limits ──
+# ── Usage / Rate Limits (from stdin, no API fetch needed) ──
 USAGE_LINE=""
 if [ "$SHOW_USAGE" != "0" ]; then
-
-  get_oauth_token() {
-    local token=""
-    # 1. Credentials file
-    local creds="$HOME/.claude/.credentials.json"
-    if [ -f "$creds" ]; then
-      token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds" 2>/dev/null)
-      if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
-    fi
-    # 2. Linux keychain
-    if command -v secret-tool &>/dev/null; then
-      local blob
-      local timeout_bin
-      timeout_bin=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
-      if [ -n "$timeout_bin" ]; then
-        blob=$("$timeout_bin" 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
-      else
-        blob=$(secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
-      fi
-      if [ -n "$blob" ]; then
-        token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-        if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
-      fi
-    fi
-    # 3. macOS keychain
-    if command -v security &>/dev/null; then
-      local blob
-      blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-      if [ -n "$blob" ]; then
-        token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-        if [ -n "$token" ] && [ "$token" != "null" ]; then echo "$token"; return 0; fi
-      fi
-    fi
-    echo ""
-  }
 
   build_usage_bar() {
     local pct=$1 width=10
@@ -471,15 +429,11 @@ if [ "$SHOW_USAGE" != "0" ]; then
   }
 
   format_reset_time() {
-    local iso="$1" style="$2"
-    [ -z "$iso" ] || [ "$iso" = "null" ] && return
-    local epoch
-    epoch=$(date -d "$iso" +%s 2>/dev/null)
-    if [ -z "$epoch" ]; then
-      local stripped="${iso%%.*}"; stripped="${stripped%%Z}"
-      epoch=$(env TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
-    fi
-    [ -z "$epoch" ] && return
+    local epoch="$1" style="$2"
+    [ -z "$epoch" ] || [ "$epoch" = "null" ] && return
+    # resets_at is Unix epoch seconds; handle float strings
+    epoch=$(safe_int "$(echo "$epoch" | cut -d. -f1)")
+    [ "$epoch" -le 0 ] 2>/dev/null && return
     case "$style" in
       time)
         date -d "@$epoch" +"%l:%M%P" 2>/dev/null | sed 's/^ //' || \
@@ -492,74 +446,39 @@ if [ "$SHOW_USAGE" != "0" ]; then
     esac
   }
 
-  # Fetch usage with caching (60s success, 15s failure)
-  USAGE_CACHE="${CACHE_DIR}/cc-usage-cache.json"
-  USAGE_DATA=""
-  NEEDS_FETCH=true
+  # Rate limits come directly from stdin JSON (Pro/Max subscribers only).
+  # Each window (five_hour / seven_day) may be independently absent.
+  FIVE_PCT=$(safe_int "$(jval '.rate_limits.five_hour.used_percentage' '0' | cut -d. -f1)")
+  FIVE_RESET_EPOCH=$(jval '.rate_limits.five_hour.resets_at' '')
+  FIVE_RESET=$(format_reset_time "$FIVE_RESET_EPOCH" "time")
+  FIVE_BAR=$(build_usage_bar "$FIVE_PCT")
 
-  if [ -f "$USAGE_CACHE" ]; then
-    CACHE_MOD_U=$(stat -c %Y "$USAGE_CACHE" 2>/dev/null || stat -f %m "$USAGE_CACHE" 2>/dev/null || echo 0)
-    NOW_U=$(date +%s)
-    CACHE_AGE=$((NOW_U - CACHE_MOD_U))
-    if jq -e '.five_hour' "$USAGE_CACHE" &>/dev/null; then
-      [ "$CACHE_AGE" -lt 60 ] && NEEDS_FETCH=false
-    else
-      [ "$CACHE_AGE" -lt 300 ] && NEEDS_FETCH=false
-    fi
-    USAGE_DATA=$(cat "$USAGE_CACHE" 2>/dev/null)
-  fi
+  SEVEN_PCT=$(safe_int "$(jval '.rate_limits.seven_day.used_percentage' '0' | cut -d. -f1)")
+  SEVEN_RESET_EPOCH=$(jval '.rate_limits.seven_day.resets_at' '')
+  SEVEN_RESET=$(format_reset_time "$SEVEN_RESET_EPOCH" "datetime")
+  SEVEN_BAR=$(build_usage_bar "$SEVEN_PCT")
 
-  if $NEEDS_FETCH; then
-    TOKEN=$(get_oauth_token)
-    if [ -n "$TOKEN" ]; then
-      # SEC-004: Use curl config file (-K) to keep token out of argv (visible in ps)
-      # SEC-007: Use mktemp for unpredictable name; trap ensures cleanup on signal
-      CURL_CFG=$(mktemp "${CACHE_DIR}/cc-curl-cfg-XXXXXXXX")
-      trap 'rm -f "$CURL_CFG"' EXIT INT TERM
-      printf -- '-H "Authorization: Bearer %s"\n-H "anthropic-beta: oauth-2025-04-20"\n' "$TOKEN" > "$CURL_CFG"
-      chmod 600 "$CURL_CFG" 2>/dev/null
-      RESP=$(curl -s --max-time 5 -K "$CURL_CFG" \
-        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-      rm -f "$CURL_CFG"
-      trap - EXIT INT TERM
-      if [ -n "$RESP" ] && echo "$RESP" | jq -e '.five_hour' &>/dev/null; then
-        USAGE_DATA="$RESP"
-        echo "$RESP" > "$USAGE_CACHE"
-      else
-        echo '{"error":true}' > "$USAGE_CACHE"
-      fi
-    fi
-    [ -z "$USAGE_DATA" ] && [ -f "$USAGE_CACHE" ] && USAGE_DATA=$(cat "$USAGE_CACHE" 2>/dev/null)
-  fi
+  FIVE_CLR=$GRN; [ "$FIVE_PCT" -ge 50 ] && FIVE_CLR=$YEL; [ "$FIVE_PCT" -ge 90 ] && FIVE_CLR=$RED
+  SEVEN_CLR=$GRN; [ "$SEVEN_PCT" -ge 50 ] && SEVEN_CLR=$YEL; [ "$SEVEN_PCT" -ge 90 ] && SEVEN_CLR=$RED
 
-  # Build usage panel content
-  if [ -n "$USAGE_DATA" ] && echo "$USAGE_DATA" | jq -e '.five_hour' &>/dev/null; then
-    FIVE_PCT=$(safe_int "$(echo "$USAGE_DATA" | jq -r '.five_hour.utilization // 0' | cut -d. -f1)")
-    FIVE_RESET_ISO=$(echo "$USAGE_DATA" | jq -r '.five_hour.resets_at // empty')
-    FIVE_RESET=$(format_reset_time "$FIVE_RESET_ISO" "time")
-    FIVE_BAR=$(build_usage_bar "$FIVE_PCT")
+  USAGE_LINE="  ${LBL}5-Hour${RST} ${FIVE_BAR} ${FIVE_CLR}${FIVE_PCT}%${RST}"
+  [ -n "$FIVE_RESET" ] && USAGE_LINE+=" ${LBL}⟳${RST} ${VAL}${FIVE_RESET}${RST}"
+  USAGE_LINE+="   ${LBL}Weekly${RST} ${SEVEN_BAR} ${SEVEN_CLR}${SEVEN_PCT}%${RST}"
+  [ -n "$SEVEN_RESET" ] && USAGE_LINE+=" ${LBL}⟳${RST} ${VAL}${SEVEN_RESET}${RST}"
+fi
 
-    SEVEN_PCT=$(safe_int "$(echo "$USAGE_DATA" | jq -r '.seven_day.utilization // 0' | cut -d. -f1)")
-    SEVEN_RESET_ISO=$(echo "$USAGE_DATA" | jq -r '.seven_day.resets_at // empty')
-    SEVEN_RESET=$(format_reset_time "$SEVEN_RESET_ISO" "datetime")
-    SEVEN_BAR=$(build_usage_bar "$SEVEN_PCT")
-
-    FIVE_CLR=$GRN; [ "$FIVE_PCT" -ge 50 ] && FIVE_CLR=$YEL; [ "$FIVE_PCT" -ge 90 ] && FIVE_CLR=$RED
-    SEVEN_CLR=$GRN; [ "$SEVEN_PCT" -ge 50 ] && SEVEN_CLR=$YEL; [ "$SEVEN_PCT" -ge 90 ] && SEVEN_CLR=$RED
-
-    USAGE_LINE="  ${LBL}5-Hour${RST} ${FIVE_BAR} ${FIVE_CLR}${FIVE_PCT}%${RST}"
-    [ -n "$FIVE_RESET" ] && USAGE_LINE+=" ${LBL}⟳${RST} ${VAL}${FIVE_RESET}${RST}"
-    USAGE_LINE+="   ${LBL}Weekly${RST} ${SEVEN_BAR} ${SEVEN_CLR}${SEVEN_PCT}%${RST}"
-    [ -n "$SEVEN_RESET" ] && USAGE_LINE+=" ${LBL}⟳${RST} ${VAL}${SEVEN_RESET}${RST}"
+# ── Session Name Display ──
+# Prefer stdin session_name; Python transcript extraction is used for
+# slug/custom-title fallback when no explicit name is set.
+SESSION_DISPLAY=""
+if [ "$SHOW_SESSION" != "0" ]; then
+  if [ -n "$SESSION_NAME" ]; then
+    SESSION_DISPLAY="  ${LBL}·${RST} ${VAL}$(sanitize_tty "$SESSION_NAME")${RST}"
   fi
 
 fi
 
 # ── Output ──
-SESSION_DISPLAY=""
-if [ "$SHOW_SESSION" != "0" ] && [ -n "$R_SESSION" ]; then
-  SESSION_DISPLAY="  ${LBL}·${RST} ${VAL}${R_SESSION}${RST}"
-fi
 printf "%b\n" "$HLINE"
 row "  ${BLU}${MODEL_NAME}${RST}  ${VAL}${CWD_SHORT}${RST}  ${GIT_INFO}${EFFORT_INFO}${SESSION_DISPLAY}"
 row "  ${BAR}  ${CTX_CLR}${PCT}%${RST}  ${VAL}$(fmt_k "$CTX_USED")/$(fmt_k "$CTX_SIZE")${RST}"

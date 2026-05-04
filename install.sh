@@ -7,7 +7,6 @@ TARGET="$CLAUDE_DIR/statusline.sh"
 SCRIPT_BACKUP="$CLAUDE_DIR/statusline.sh.cc-backup"
 CONFIG_BACKUP="$CLAUDE_DIR/statusline-config.cc-backup.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-EDITION=""
 
 STATUSLINE_VALUE='{"type":"command","command":"~/.claude/statusline.sh"}'
 
@@ -23,13 +22,11 @@ warn()  { printf "${YELLOW}[!!]${RESET} %s\n" "$1"; }
 error() { printf "${RED}[err]${RESET} %s\n" "$1"; }
 
 usage() {
-    echo "Usage: install.sh [--edition slim|full] [--uninstall] [--help]"
+    echo "Usage: install.sh [--uninstall] [--help]"
     echo ""
-    echo "  (no args)         Interactive edition selection"
-    echo "  --edition slim    Install slim edition"
-    echo "  --edition full    Install full edition"
-    echo "  --uninstall       Remove cc-statusline and restore previous config"
-    echo "  --help            Show this help message"
+    echo "  (no args)    Install cc-statusline"
+    echo "  --uninstall  Remove cc-statusline and restore previous config"
+    echo "  --help       Show this help message"
 }
 
 check_deps() {
@@ -59,38 +56,17 @@ check_deps() {
         echo ""
     fi
 
-    if [ "$EDITION" = "full" ]; then
-        local full_missing=()
-        for cmd in curl git; do
-            if ! command -v "$cmd" &>/dev/null; then
-                full_missing+=("$cmd")
-            fi
-        done
-        if [ ${#full_missing[@]} -gt 0 ]; then
-            warn "Missing optional dependencies for full edition: ${full_missing[*]}"
-            echo ""
-        fi
+    # git is optional (branch + dirty indicator)
+    if ! command -v git &>/dev/null; then
+        warn "git not found — branch and dirty status won't be shown"
+        echo ""
     fi
 }
 
-select_edition() {
-    if [ -n "$EDITION" ]; then return; fi
-    echo "Select edition:"
-    echo "  1) slim  — context, cost, session info (lightweight)"
-    echo "  2) full  — everything in slim + git, rate limits, tool tracking (recommended)"
-    printf "Choice [2]: "
-    read -r choice
-    case "${choice:-2}" in
-        1) EDITION="slim" ;;
-        *) EDITION="full" ;;
-    esac
-}
-
 do_install() {
-    select_edition
     check_deps
 
-    local SOURCE="$SCRIPT_DIR/${EDITION}/statusline.sh"
+    local SOURCE="$SCRIPT_DIR/statusline.sh"
     mkdir -p "$CLAUDE_DIR"
 
     if [ ! -f "$SOURCE" ]; then
@@ -130,7 +106,7 @@ do_install() {
     info "Updated settings.json with statusLine config"
 
     echo ""
-    echo -e "${GREEN}cc-statusline (${EDITION}) installed!${RESET}"
+    echo -e "${GREEN}cc-statusline installed!${RESET}"
     echo -e "${DIM}Restart Claude Code to see the statusline.${RESET}"
 }
 
@@ -179,14 +155,6 @@ case "${1:-}" in
         ;;
     --uninstall)
         do_uninstall
-        ;;
-    --edition)
-        EDITION="${2:-}"
-        if [ "$EDITION" != "slim" ] && [ "$EDITION" != "full" ]; then
-            error "Invalid edition: $EDITION (use 'slim' or 'full')"
-            exit 1
-        fi
-        do_install
         ;;
     "")
         do_install
